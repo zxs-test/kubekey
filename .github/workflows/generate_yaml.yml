@@ -3,6 +3,8 @@ name: Generate Component Versions YAML
 on:
   issues:
     types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
 
 jobs:
   generate-yaml:
