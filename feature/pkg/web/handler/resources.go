@@ -55,7 +55,7 @@ func (h ResourceHandler) ConfigInfo(request *restful.Request, response *restful.
 	file, err := os.Open(filepath.Join(h.rootPath, api.SchemaConfigFile))
 	if err != nil {
 		if os.IsNotExist(err) {
-			_ = response.WriteError(http.StatusNotFound, err)
+			_ = response.WriteEntity(api.SUCCESS.SetResult("waiting for config to be created"))
 		} else {
 			_ = response.WriteError(http.StatusInternalServerError, err)
 		}
@@ -84,17 +84,12 @@ func (h ResourceHandler) PostConfig(request *restful.Request, response *restful.
 	}
 
 	// Open config file for reading and writing.
-	configFile, err := os.OpenFile(filepath.Join(h.rootPath, api.SchemaConfigFile), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		_ = response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-	defer configFile.Close()
-
-	// Decode old config if present.
-	if err := json.NewDecoder(configFile).Decode(&oldConfig); err != nil && err != io.EOF {
-		_ = response.WriteError(http.StatusInternalServerError, err)
-		return
+	if oldConfigFile, err := os.ReadFile(filepath.Join(h.rootPath, api.SchemaConfigFile)); err == nil {
+		// Decode old config if present.
+		if err := json.Unmarshal(oldConfigFile, &oldConfig); err != nil && !errors.Is(err, io.EOF) {
+			_ = response.WriteError(http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	namespace := query.DefaultString(request.QueryParameter("cluster"), "default")
@@ -104,7 +99,14 @@ func (h ResourceHandler) PostConfig(request *restful.Request, response *restful.
 
 	// Iterate over new config and trigger precheck playbooks if config changed.
 	for fileName, newVal := range newConfig {
-		if reflect.DeepEqual(newVal, oldConfig[fileName]) {
+		// if playbook has created should skip it.
+		playbookList := &kkcorev1.PlaybookList{}
+		if err := h.client.List(request.Request.Context(), playbookList, ctrlclient.InNamespace(namespace),
+			ctrlclient.MatchingLabels{"install." + api.SchemaLabelSubfix: fileName}); err != nil {
+			_ = response.WriteError(http.StatusInternalServerError, err)
+			return
+		}
+		if len(playbookList.Items) > 0 {
 			continue
 		}
 		schemaInfo, err := os.ReadFile(filepath.Join(h.rootPath, fileName))
@@ -164,11 +166,12 @@ func (h ResourceHandler) PostConfig(request *restful.Request, response *restful.
 	for fileName, playbook := range playbooks {
 		if playbook.Status.FailureMessage != "" {
 			preCheckResult[fileName] = playbook.Status.FailureMessage
+			delete(newConfig, fileName)
 		}
 	}
 
 	// Write new config to file.
-	if _, err := configFile.Write(bodyBytes); err != nil {
+	if err := os.WriteFile(filepath.Join(h.rootPath, api.SchemaConfigFile), bodyBytes, 0644); err != nil {
 		_ = response.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -177,7 +180,7 @@ func (h ResourceHandler) PostConfig(request *restful.Request, response *restful.
 	if len(preCheckResult) > 0 {
 		_ = response.WriteHeaderAndEntity(http.StatusUnprocessableEntity, api.Result{Message: api.ResultFailed, Result: preCheckResult})
 	} else {
-		_ = response.WriteEntity(api.SUCCESS)
+		_ = response.WriteEntity(api.SUCCESS.SetResult(newConfig))
 	}
 }
 
@@ -186,6 +189,30 @@ func (h ResourceHandler) ListIP(request *restful.Request, response *restful.Resp
 	queryParam := query.ParseQueryParameter(request)
 	cidr := request.QueryParameter("cidr")
 	sshPort := query.DefaultString(request.QueryParameter("sshPort"), "22")
+
+	var existsInventoryList kkcorev1.InventoryList
+	err := h.client.List(request.Request.Context(), &existsInventoryList)
+
+	if err != nil && ctrlclient.IgnoreNotFound(err) != nil {
+		klog.Errorf("failed to list inventory objects: %v", err)
+		_ = response.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	var addedPorts = make(map[string]struct{})
+	for _, item := range existsInventoryList.Items {
+		for _, iData := range item.Spec.Hosts {
+			var iHost api.InventoryConnect
+			err = json.Unmarshal(iData.Raw, &iHost)
+			if err != nil {
+				continue
+			}
+			if iHost.Connector.Port == "" {
+				iHost.Connector.Port = "22"
+			}
+			addedPorts[iHost.Connector.Host+":"+iHost.Connector.Port] = struct{}{}
+		}
+	}
 
 	ips := utils.ParseIP(cidr)
 	ipTable := make([]api.IPTable, 0, len(ips))
@@ -197,6 +224,10 @@ func (h ResourceHandler) ListIP(request *restful.Request, response *restful.Resp
 	for range maxConcurrency {
 		wg.Start(func() {
 			for ip := range jobChannel {
+				var added = false
+				if _, ok := addedPorts[ip+":"+sshPort]; ok {
+					added = true
+				}
 				if utils.IsLocalhostIP(ip) {
 					mu.Lock()
 					ipTable = append(ipTable, api.IPTable{
@@ -205,6 +236,7 @@ func (h ResourceHandler) ListIP(request *restful.Request, response *restful.Resp
 						Localhost:     true,
 						SSHReachable:  true,
 						SSHAuthorized: true,
+						Added:         added,
 					})
 					mu.Unlock()
 					continue
@@ -223,6 +255,7 @@ func (h ResourceHandler) ListIP(request *restful.Request, response *restful.Resp
 					SSHPort:       sshPort,
 					SSHReachable:  reachable,
 					SSHAuthorized: authorized,
+					Added:         added,
 				})
 				mu.Unlock()
 			}
@@ -319,7 +352,8 @@ func (h ResourceHandler) ListSchema(request *restful.Request, response *restful.
 			api.HandleError(response, request, err)
 			return
 		}
-		schema := api.SchemaFile2Table(schemaFile, entry.Name())
+
+		schema := api.SchemaFile2Table(schemaFile, filepath.Join(h.rootPath, api.SchemaConfigFile), entry.Name())
 		// For each playbook, if it matches a label in schema.Playbook and the label value equals schema.Name, add its info.
 		for _, playbook := range playbookList.Items {
 			for label, schemaName := range playbook.Labels {
@@ -607,4 +641,172 @@ func isSSHAuthorized(ipStr, sshPort string) (bool, bool) {
 
 	// Port 22 is reachable and SSH authentication succeeded.
 	return true, true
+}
+
+func checkSSHConnect(ipStr, sshPort, sshUser, sshPwd, sshPrivateKeyContent string) (bool, bool) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ipStr, sshPort), time.Second)
+	if err != nil {
+		klog.V(6).Infof("port %s not reachable on ip %q, error %v", sshPort, ipStr, err)
+		return false, false
+	}
+	defer conn.Close()
+
+	var authMethods []ssh.AuthMethod
+
+	if sshPwd != "" {
+		authMethods = append(authMethods, ssh.Password(sshPwd))
+		klog.V(6).Infof("Added password authentication for user %s", sshUser)
+	}
+
+	if sshPrivateKeyContent != "" {
+		signer, err := ssh.ParsePrivateKey([]byte(sshPrivateKeyContent))
+		if err != nil {
+			klog.V(6).Infof("Failed to parse provided private key: %v", err)
+		} else {
+			authMethods = append(authMethods, ssh.PublicKeys(signer))
+			klog.V(6).Infof("Added public key authentication from provided content for user %s", sshUser)
+		}
+	} else {
+		klog.V(6).Infof("No private key content provided, checking for default private keys")
+		foundKeys := findSSHPrivateKeys()
+		var signers = make([]ssh.Signer, 0)
+		for _, keyPath := range foundKeys {
+			keyBytes, err := os.ReadFile(keyPath)
+			if err != nil {
+				klog.V(6).Infof("Failed to read private key file %s: %v", keyPath, err)
+				continue
+			}
+
+			signer, err := ssh.ParsePrivateKey(keyBytes)
+			if err != nil {
+				klog.V(6).Infof("Failed to parse private key from %s: %v", keyPath, err)
+				continue
+			}
+			signers = append(signers, signer)
+		}
+		if len(signers) > 0 {
+			authMethods = append(authMethods, ssh.PublicKeys(signers...))
+		}
+	}
+
+	klog.V(6).Infof("Using %d authentication methods for SSH connection", len(authMethods))
+
+	config := &ssh.ClientConfig{
+		User:            sshUser,
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}
+
+	sshClient, err := ssh.Dial("tcp", net.JoinHostPort(ipStr, sshPort), config)
+	if err != nil {
+		klog.V(6).Infof("SSH connection failed: %v", err)
+		return true, false
+	}
+	defer sshClient.Close()
+
+	session, err := sshClient.NewSession()
+	if err != nil {
+		klog.V(6).Infof("SSH session creation failed: %v", err)
+		return true, false
+	}
+	defer session.Close()
+
+	err = session.Run("echo 'SSH connection test'")
+	if err != nil {
+		klog.V(6).Infof("SSH command execution failed: %v", err)
+		return true, false
+	}
+
+	klog.V(6).Infof("SSH connection successful for user %s", sshUser)
+	return true, true
+}
+
+func findSSHPrivateKeys() []string {
+	var keyFiles = make([]string, 0)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		klog.V(6).Infof("Failed to get user home directory: %v", err)
+		homeDir = "/root"
+	}
+
+	sshDir := filepath.Join(homeDir, ".ssh")
+	var sshDirInfo os.FileInfo
+
+	if sshDirInfo, err = os.Stat(sshDir); os.IsNotExist(err) {
+		klog.V(6).Infof("SSH directory %s does not exist", sshDir)
+		return keyFiles
+	}
+
+	if !sshDirInfo.IsDir() {
+		return keyFiles
+	}
+
+	dirs, _ := os.ReadDir(sshDir)
+	for _, dir := range dirs {
+		if dir.IsDir() {
+			continue
+		}
+		keyFiles = append(keyFiles, filepath.Join(sshDir, dir.Name()))
+	}
+
+	return keyFiles
+}
+
+// PreCheckHost check input ssh information.
+func (h ResourceHandler) PreCheckHost(request *restful.Request, response *restful.Response) {
+	var hosts []api.IPHostCheckData
+	if err := request.ReadEntity(&hosts); err != nil {
+		api.HandleError(response, request, err)
+		return
+	}
+	var wg = sync.WaitGroup{}
+	var result = make([]api.IPHostCheckResult, len(hosts))
+	wg.Add(len(hosts))
+	for i, host := range hosts {
+		go func(idx int, currentHost api.IPHostCheckData) {
+			defer wg.Done()
+			var status string
+			if utils.IsLocalhostIP(currentHost.IP) {
+				status = _const.SSHVerifyStatusSuccess
+			}
+			if !isIPOnline(currentHost.IP) {
+				status = _const.SSHVerifyStatusOffline
+			}
+			if currentHost.SSHUser == "" {
+				status = _const.SSHVerifyStatusSSHIncomplete
+			}
+			if status == "" {
+				reachable, authorized := checkSSHConnect(currentHost.IP, currentHost.SSHPort,
+					currentHost.SSHUser, currentHost.SSHPwd, currentHost.SSHPrivateKeyContent)
+				klog.V(6).Infof("check ssh connect for %s:%s with result:%v,%v",
+					currentHost.IP, currentHost.SSHPort, reachable, authorized)
+				switch {
+				case authorized && reachable:
+					status = _const.SSHVerifyStatusSuccess
+				case !authorized && reachable:
+					status = _const.SSHVerifyStatusFailed
+				case !reachable && !authorized:
+					status = _const.SSHVerifyStatusUnreachable
+				default:
+					klog.Warningf("check ssh connect show authorized but unreachable! ip:%s,port=%s",
+						currentHost.IP, currentHost.SSHPort)
+					status = _const.SSHVerifyStatusFailed
+				}
+			}
+			// if ssh_failed, it means current host can access target host but unauthorized
+			// in this case,if user did not input pwd or key,it means ssh information incomplete
+			if status == _const.SSHVerifyStatusFailed && currentHost.SSHPwd == "" && currentHost.SSHPrivateKeyContent == "" {
+				status = _const.SSHVerifyStatusSSHIncomplete
+			}
+			result[idx] = api.IPHostCheckResult{
+				IP:      currentHost.IP,
+				SSHPort: currentHost.SSHPort,
+				Status:  status,
+			}
+		}(i, host)
+	}
+	wg.Wait()
+	_ = response.WriteEntity(result)
 }

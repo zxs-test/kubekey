@@ -1,11 +1,11 @@
 ---
-# load defaults vars
+# Load default variables and perform prechecks on all hosts
 - hosts:
     - all
-  vars_files:
-    - vars/delete_cluster.yaml
-
-- import_playbook: hook/pre_install.yaml
+  gather_facts: true
+  roles:
+    - defaults
+    - native/root
 
 - hosts: 
     - k8s_cluster
@@ -13,28 +13,27 @@
     - uninstall/kubernetes
     - role: uninstall/cri
       when: 
-        - .deleteCRI
+        - .delete.cri
         - .groups.image_registry | default list | has .inventory_hostname | not
   post_tasks:
     - name: delete localDNS file
       ignore_errors: true
+      loop: "{{ .native.localDNS | toJson }}"
       command: |
         sed -i ':a;$!{N;ba};s@# kubekey hosts BEGIN.*# kubekey hosts END@@' {{ .item }}
-        sed -i ':a;$!{N;ba};s@# kubekey control_plane_endpoint BEGIN.*# kubekey control_plane_endpoint END@@' {{ .item }}
-      when: .deleteDNS
-      loop: "{{ .localDNS | toJson }}"
+        sed -i ':a;$!{N;ba};s@# kubekey kubernetes control_plane_endpoint BEGIN.*# kubekey kubernetes control_plane_endpoint END@@' {{ .item }}
+        sed -i ':a;$!{N;ba};s@# kubekey image_registry control_plane_endpoint BEGIN.*# kubekey image_registry control_plane_endpoint END@@' {{ .item }}
+      when: .delete.dns
 
 - hosts:
     - etcd
   roles:
     - role: uninstall/etcd
-      when: .deleteETCD
+      when: .delete.etcd
 
 - hosts:
    - image_registry
   roles:
     - role: uninstall/image-registry
       when:
-       - .deleteImageRegistry
-
-- import_playbook: hook/post_install.yaml
+       - .delete.image_registry

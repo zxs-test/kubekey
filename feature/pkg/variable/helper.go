@@ -25,7 +25,6 @@ import (
 
 	"github.com/cockroachdb/errors"
 	kkcorev1 "github.com/kubesphere/kubekey/api/core/v1"
-	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/json"
@@ -35,29 +34,6 @@ import (
 	_const "github.com/kubesphere/kubekey/v4/pkg/const"
 	"github.com/kubesphere/kubekey/v4/pkg/converter/tmpl"
 )
-
-// CombineMappingNode combines two yaml.Node objects representing mapping nodes.
-// If a is nil or zero, returns b.
-// If both a and b are mapping nodes, appends b's content to a.
-// Returns a in all other cases.
-//
-// Parameters:
-//   - a: First yaml.Node to combine
-//   - b: Second yaml.Node to combine
-//
-// Returns:
-//   - Combined yaml.Node, with b taking precedence
-func CombineMappingNode(a, b *yaml.Node) *yaml.Node {
-	if a == nil || a.IsZero() {
-		return b
-	}
-
-	if a.Kind == yaml.MappingNode && b.Kind == yaml.MappingNode {
-		a.Content = append(a.Content, b.Content...)
-	}
-
-	return a
-}
 
 // CombineVariables merge multiple variables into one variable.
 // It recursively combines two maps, where values from m2 override values from m1 if keys overlap.
@@ -365,6 +341,37 @@ func DurationVar(ctx map[string]any, args map[string]any, key string) (time.Dura
 	}
 
 	return time.ParseDuration(stringVar)
+}
+
+// AnyVar get data from input args and keys,unmarshal data into dest
+func AnyVar(ctx, args map[string]any, dest any, keys ...string) error {
+	val, found, err := unstructured.NestedFieldNoCopy(args, keys...)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	if !found {
+		return errors.Errorf("cannot find variable %q", strings.Join(keys, "."))
+	}
+	var valBytes []byte
+	switch valv := val.(type) {
+	case string:
+		valBytes = []byte(valv)
+	case []any:
+		valBytes, err = json.Marshal(valv)
+		if err != nil {
+			return errors.Wrapf(err, "failed to marshal variable %q", strings.Join(keys, "."))
+		}
+	}
+
+	valBytesAfterTmpl, err := tmpl.Parse(ctx, string(valBytes))
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(valBytesAfterTmpl, dest)
+	if err != nil {
+		return errors.Wrapf(err, "failed to unmarshal variable %q to dest", strings.Join(keys, "."))
+	}
+	return nil
 }
 
 // Extension2Variables convert runtime.RawExtension to variables

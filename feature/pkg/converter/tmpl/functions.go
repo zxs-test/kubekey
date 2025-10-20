@@ -3,6 +3,8 @@ package tmpl
 import (
 	"math"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -26,6 +28,8 @@ func funcMap() template.FuncMap {
 	f["ipFamily"] = ipFamily
 	f["pow"] = pow
 	f["subtractList"] = subtractList
+	f["fileExist"] = fileExist
+	f["unquote"] = unquote
 
 	return f
 }
@@ -106,4 +110,24 @@ func subtractList(a, b []any) ([]any, error) {
 	}
 
 	return result, nil
+}
+
+func fileExist(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func unquote(input any) string {
+	if input == nil {
+		return ""
+	}
+	inputStr, ok := input.(string)
+	if !ok {
+		return ""
+	}
+	output, err := strconv.Unquote(inputStr)
+	if err != nil {
+		return inputStr
+	}
+	return output
 }

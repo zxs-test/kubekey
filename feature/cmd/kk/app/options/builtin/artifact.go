@@ -20,6 +20,9 @@ limitations under the License.
 package builtin
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/cockroachdb/errors"
 	kkcorev1 "github.com/kubesphere/kubekey/api/core/v1"
 	"github.com/spf13/cobra"
@@ -36,6 +39,8 @@ import (
 // ArtifactExportOptions for NewArtifactExportOptions
 type ArtifactExportOptions struct {
 	options.CommonOptions
+	// kubernetes version which the cluster will install.
+	Kubernetes string
 }
 
 // NewArtifactExportOptions for newArtifactExportCommand
@@ -49,7 +54,11 @@ func NewArtifactExportOptions() *ArtifactExportOptions {
 
 // Flags add to newArtifactExportCommand
 func (o *ArtifactExportOptions) Flags() cliflag.NamedFlagSets {
-	return o.CommonOptions.Flags()
+	fss := o.CommonOptions.Flags()
+	kfs := fss.FlagSet("config")
+	kfs.StringVar(&o.Kubernetes, "with-kubernetes", o.Kubernetes, fmt.Sprintf("Specify a supported version of kubernetes. default is %s", o.Kubernetes))
+
+	return fss
 }
 
 // Complete options. create Playbook, Config and Inventory
@@ -74,6 +83,9 @@ func (o *ArtifactExportOptions) Complete(cmd *cobra.Command, args []string) (*kk
 		Playbook: o.Playbook,
 		SkipTags: []string{"certs"},
 	}
+
+	o.CommonOptions.Set = setDefaultDownload(o.CommonOptions.Set)
+
 	if err := o.CommonOptions.Complete(playbook); err != nil {
 		return nil, err
 	}
@@ -88,6 +100,10 @@ func (o *ArtifactExportOptions) Complete(cmd *cobra.Command, args []string) (*kk
 // ArtifactImagesOptions for NewArtifactImagesOptions
 type ArtifactImagesOptions struct {
 	options.CommonOptions
+	// kubernetes version which the cluster will install.
+	Kubernetes string
+	Push       bool
+	Pull       bool
 }
 
 // NewArtifactImagesOptions for newArtifactImagesCommand
@@ -100,7 +116,13 @@ func NewArtifactImagesOptions() *ArtifactImagesOptions {
 
 // Flags add to newArtifactImagesCommand
 func (o *ArtifactImagesOptions) Flags() cliflag.NamedFlagSets {
-	return o.CommonOptions.Flags()
+	fss := o.CommonOptions.Flags()
+	kfs := fss.FlagSet("config")
+	kfs.StringVar(&o.Kubernetes, "with-kubernetes", o.Kubernetes, fmt.Sprintf("Specify a supported version of kubernetes. default is %s", o.Kubernetes))
+	kfs.BoolVar(&o.Push, "push", o.Push, "Push image to image registry")
+	kfs.BoolVar(&o.Pull, "pull", o.Pull, "Pull image to binary dir")
+
+	return fss
 }
 
 // Complete options. create Playbook, Config and Inventory
@@ -121,14 +143,32 @@ func (o *ArtifactImagesOptions) Complete(cmd *cobra.Command, args []string) (*kk
 	}
 	o.Playbook = args[0]
 
-	playbook.Spec = kkcorev1.PlaybookSpec{
-		Playbook: o.Playbook,
-		Tags:     []string{"only_image"},
+	var tags = []string{"image_registry"}
+	if o.Push {
+		tags = append(tags, "push")
+	}
+	if o.Pull {
+		tags = append(tags, "pull")
 	}
 
+	playbook.Spec = kkcorev1.PlaybookSpec{
+		Playbook: o.Playbook,
+		Tags:     tags,
+	}
+
+	o.CommonOptions.Set = setDefaultDownload(o.CommonOptions.Set)
 	if err := o.CommonOptions.Complete(playbook); err != nil {
 		return nil, errors.WithStack(err)
 	}
 
 	return playbook, nil
+}
+
+func setDefaultDownload(set []string) []string {
+	for _, s := range set {
+		if strings.Contains(s, "download.download_image=") {
+			return set
+		}
+	}
+	return append(set, "download.download_image=true")
 }

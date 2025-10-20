@@ -32,7 +32,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	_const "github.com/kubesphere/kubekey/v4/pkg/const"
-	"github.com/kubesphere/kubekey/v4/pkg/variable"
+	"github.com/kubesphere/kubekey/v4/pkg/converter/tmpl"
+	"github.com/kubesphere/kubekey/v4/pkg/utils"
 )
 
 // builtinProjectFunc is a function that creates a Project from a built-in playbook
@@ -74,10 +75,11 @@ func New(ctx context.Context, playbook kkcorev1.Playbook, update bool) (Project,
 // project implements the Project interface using an fs.FS
 type project struct {
 	fs.FS
-
 	basePlaybook string
-
 	*kkprojectv1.Playbook
+
+	config        map[string]any
+	playbookGraph *utils.KahnGraph
 }
 
 // ReadFile reads and returns the contents of the file at the given path
@@ -104,7 +106,7 @@ func (f *project) WalkDir(path string, fn fs.WalkDirFunc) error {
 func (f *project) MarshalPlaybook() (*kkprojectv1.Playbook, error) {
 	f.Playbook = &kkprojectv1.Playbook{}
 	// convert playbook to kkprojectv1.Playbook
-	if err := f.loadPlaybook(f.basePlaybook); err != nil {
+	if err := f.loadPlaybook("", f.basePlaybook); err != nil {
 		return nil, err
 	}
 	// validate playbook
@@ -116,8 +118,13 @@ func (f *project) MarshalPlaybook() (*kkprojectv1.Playbook, error) {
 }
 
 // loadPlaybook loads a playbook and all its included playbooks into a single playbook
-func (f *project) loadPlaybook(basePlaybook string) error {
+func (f *project) loadPlaybook(fromPlayBook, basePlaybook string) error {
 	// baseDir is the local ansible project dir which playbook belong to
+	if f.playbookGraph.AddEdgeAndCheckCycle(fromPlayBook, basePlaybook) {
+		// play book cycle imported
+		return errors.Errorf("failed to import %s because it cause a cycle import", basePlaybook)
+	}
+
 	pbData, err := fs.ReadFile(f.FS, basePlaybook)
 	if err != nil {
 		return errors.Wrapf(err, "failed to read playbook %q", basePlaybook)
@@ -168,11 +175,15 @@ func (f *project) loadPlaybook(basePlaybook string) error {
 // dealImportPlaybook handles the "import_playbook" argument in a play
 func (f *project) dealImportPlaybook(p kkprojectv1.Play, basePlaybook string) error {
 	if p.ImportPlaybook != "" {
-		importPlaybook := f.getPath(GetImportPlaybookRelPath(basePlaybook, p.ImportPlaybook))
+		importPlaybook, _ := f.getPath(GetImportPlaybookRelPath(basePlaybook, p.ImportPlaybook))
 		if importPlaybook == "" {
 			return errors.Errorf("failed to find import_playbook %q base on %q. it's should be:\n %s", p.ImportPlaybook, basePlaybook, PathFormatImportPlaybook)
 		}
-		if err := f.loadPlaybook(importPlaybook); err != nil {
+		if basePlaybook == importPlaybook {
+			// play book import self
+			return errors.Errorf("failed to import %s because it is already imported", p.ImportPlaybook)
+		}
+		if err := f.loadPlaybook(basePlaybook, importPlaybook); err != nil {
 			return err
 		}
 	}
@@ -180,11 +191,15 @@ func (f *project) dealImportPlaybook(p kkprojectv1.Play, basePlaybook string) er
 	return nil
 }
 
-// dealVarsFiles handles the "var_files" argument in a play
+// dealVarsFiles handles the "vars_files" argument in a play
 func (f *project) dealVarsFiles(p *kkprojectv1.Play, basePlaybook string) error {
-	for _, varsFile := range p.VarsFiles {
+	for _, varsFileStr := range p.VarsFiles {
 		// load vars from vars_files
-		file := f.getPath(GetVarsFilesRelPath(basePlaybook, varsFile))
+		varsFile, err := tmpl.ParseFunc(f.config, varsFileStr, func(b []byte) string { return string(b) })
+		if err != nil {
+			return errors.Errorf("failed to parse varFile %q", varsFileStr)
+		}
+		file, _ := f.getPath(GetVarsFilesRelPath(basePlaybook, varsFile))
 		if file == "" {
 			return errors.Errorf("failed to find vars_files %q base on %q. it's should be:\n %s", varsFile, basePlaybook, PathFormatVarsFile)
 		}
@@ -203,7 +218,7 @@ func (f *project) dealVarsFiles(p *kkprojectv1.Play, basePlaybook string) error 
 		// combine map node
 		if node.Content[0].Kind == yaml.MappingNode {
 			// skip empty file
-			p.Vars = *variable.CombineMappingNode(&p.Vars, node.Content[0])
+			p.Vars.Nodes = append(p.Vars.Nodes, *node.Content[0])
 		}
 	}
 
@@ -211,12 +226,12 @@ func (f *project) dealVarsFiles(p *kkprojectv1.Play, basePlaybook string) error 
 }
 
 func (f *project) dealRole(role *kkprojectv1.Role, basePlaybook string) error {
-	baseRole := f.getPath(GetRoleRelPath(basePlaybook, role.Role))
+	baseRole, _ := f.getPath(GetRoleRelPath(basePlaybook, role.Role))
 	if baseRole == "" {
 		return errors.Errorf("failed to find role %q base on %q. it's should be:\n %s", role.Role, basePlaybook, PathFormatRole)
 	}
 	// deal dependency
-	if meta := f.getPath(GetRoleMetaRelPath(baseRole)); meta != "" {
+	if meta, _ := f.getPath(GetRoleMetaRelPath(baseRole)); meta != "" {
 		mdata, err := fs.ReadFile(f.FS, meta)
 		if err != nil {
 			return errors.Wrapf(err, "failed to read role meta file %q", meta)
@@ -233,7 +248,7 @@ func (f *project) dealRole(role *kkprojectv1.Role, basePlaybook string) error {
 		}
 	}
 	// deal tasks
-	if task := f.getPath(GetRoleTaskRelPath(baseRole)); task != "" {
+	if task, _ := f.getPath(GetRoleTaskRelPath(baseRole)); task != "" {
 		rdata, err := fs.ReadFile(f.FS, task)
 		if err != nil {
 			return errors.Wrapf(err, "failed to read file %q", task)
@@ -245,25 +260,44 @@ func (f *project) dealRole(role *kkprojectv1.Role, basePlaybook string) error {
 		role.Block = blocks
 	}
 	// deal defaults (optional)
-	if defaults := f.getPath(GetRoleDefaultsRelPath(baseRole)); defaults != "" {
+	if defaults, _ := f.getPath(GetRoleDefaultsRelPath(baseRole)); defaults != "" {
 		data, err := fs.ReadFile(f.FS, defaults)
 		if err != nil {
 			return errors.Wrapf(err, "failed to read defaults variable file %q", defaults)
 		}
 
-		var node yaml.Node
-		// Unmarshal the YAML document into a root node.
-		if err := yaml.Unmarshal(data, &node); err != nil {
-			return errors.Wrap(err, "failed to unmarshal YAML")
+		err = f.combineRoleVars(role, data)
+		if err != nil {
+			return err
 		}
-		if node.Kind != yaml.DocumentNode || len(node.Content) != 1 {
-			return errors.Errorf("unsupport vars_files format. it should be single map file")
+	}
+	if dirDefaults, info := f.getPath(GetRoleDefaultsRelDirPath(baseRole)); dirDefaults != "" {
+		// only handle [roles]/defaults/main directory,if file found but not a directory,skip file
+		if info.IsDir() {
+			err := utils.ReadDirFiles(f.FS, dirDefaults, func(data []byte) error {
+				return f.combineRoleVars(role, data)
+			})
+			if err != nil {
+				return errors.Wrapf(err, "failed to read defaults variable file %q", dirDefaults)
+			}
 		}
-		// combine map node
-		if node.Content[0].Kind == yaml.MappingNode {
-			// skip empty file
-			role.Vars = *variable.CombineMappingNode(&role.Vars, node.Content[0])
-		}
+	}
+	return nil
+}
+
+func (f *project) combineRoleVars(role *kkprojectv1.Role, content []byte) error {
+	var node yaml.Node
+	// Unmarshal the YAML document into a root node.
+	if err := yaml.Unmarshal(content, &node); err != nil {
+		return errors.Wrap(err, "failed to unmarshal YAML")
+	}
+	if node.Kind != yaml.DocumentNode || len(node.Content) != 1 {
+		return errors.Errorf("unsupport vars_files format. it should be single map file")
+	}
+	// combine map node
+	if node.Content[0].Kind == yaml.MappingNode {
+		// skip empty file
+		role.Vars.Nodes = append(role.Vars.Nodes, *node.Content[0])
 	}
 	return nil
 }
@@ -277,7 +311,7 @@ func (f *project) dealRoleTask(role *kkprojectv1.Role, basePlaybook string) erro
 		}
 	}
 	// Get the base path for the current role
-	baseRole := f.getPath(GetRoleRelPath(basePlaybook, role.Role))
+	baseRole, _ := f.getPath(GetRoleRelPath(basePlaybook, role.Role))
 	// Process the tasks for the current role
 	return f.dealBlock(baseRole, filepath.Join(baseRole, _const.ProjectRolesTasksDir), role.Block)
 }
@@ -299,7 +333,7 @@ func (f *project) dealBlock(top string, source string, blocks []kkprojectv1.Bloc
 			}
 		case block.IncludeTasks != "": // it's an include_tasks directive
 			// Resolve the path to the include_tasks file
-			includeTask := f.getPath(GetIncludeTaskRelPath(top, source, block.IncludeTasks))
+			includeTask, _ := f.getPath(GetIncludeTaskRelPath(top, source, block.IncludeTasks))
 			if includeTask == "" {
 				return errors.Errorf("failed to find include_task %q base on %q. it's should be:\n %s", block.IncludeTasks, source, PathFormatIncludeTask)
 			}
@@ -331,12 +365,12 @@ func (f *project) dealBlock(top string, source string, blocks []kkprojectv1.Bloc
 }
 
 // getPath returns the first valid path from a list of possible paths
-func (f *project) getPath(paths []string) string {
+func (f *project) getPath(paths []string) (string, fs.FileInfo) {
 	for _, path := range paths {
-		if _, err := fs.Stat(f.FS, path); err == nil {
-			return path
+		if info, err := fs.Stat(f.FS, path); err == nil {
+			return path, info
 		}
 	}
 
-	return ""
+	return "", nil
 }

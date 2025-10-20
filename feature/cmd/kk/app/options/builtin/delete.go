@@ -27,7 +27,6 @@ import (
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/util/yaml"
 	cliflag "k8s.io/component-base/cli/flag"
 
 	"github.com/kubesphere/kubekey/v4/cmd/kk/app/options"
@@ -45,14 +44,6 @@ func NewDeleteClusterOptions() *DeleteClusterOptions {
 		Kubernetes:    defaultKubeVersion,
 	}
 	// Set the function to get the config for the specified Kubernetes version
-	o.CommonOptions.GetConfigFunc = func() (*kkcorev1.Config, error) {
-		data, err := getConfig(o.Kubernetes)
-		if err != nil {
-			return nil, err
-		}
-		config := &kkcorev1.Config{}
-		return config, errors.Wrapf(yaml.Unmarshal(data, config), "failed to unmarshal local configFile for kube_version: %q.", o.Kubernetes)
-	}
 	// Set the function to get the inventory
 	o.CommonOptions.GetInventoryFunc = getInventory
 
@@ -63,7 +54,8 @@ func NewDeleteClusterOptions() *DeleteClusterOptions {
 type DeleteClusterOptions struct {
 	options.CommonOptions
 	// Kubernetes version which the cluster will install.
-	Kubernetes string
+	Kubernetes          string
+	DeleteAllComponents bool
 }
 
 // Flags returns the flag sets for DeleteClusterOptions
@@ -72,6 +64,7 @@ func (o *DeleteClusterOptions) Flags() cliflag.NamedFlagSets {
 	kfs := fss.FlagSet("config")
 	// Add a flag for specifying the Kubernetes version
 	kfs.StringVar(&o.Kubernetes, "with-kubernetes", o.Kubernetes, fmt.Sprintf("Specify a supported version of kubernetes. default is %s", o.Kubernetes))
+	kfs.BoolVar(&o.DeleteAllComponents, "all-components", o.DeleteAllComponents, "Delete all cluster components, including cri, etcd, dns, and the image registry.")
 
 	return fss
 }
@@ -112,9 +105,23 @@ func (o *DeleteClusterOptions) Complete(cmd *cobra.Command, args []string) (*kkc
 // completeConfig updates the configuration with container manager settings
 func (o *DeleteClusterOptions) completeConfig() error {
 	// If kube_version is not set in config, set it to the specified Kubernetes version
-	if _, ok, _ := unstructured.NestedFieldNoCopy(o.CommonOptions.Config.Value(), "kube_version"); !ok {
-		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), o.Kubernetes, "kube_version"); err != nil {
+	if _, ok, _ := unstructured.NestedFieldNoCopy(o.CommonOptions.Config.Value(), "kubernetes", "kube_version"); !ok {
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), o.Kubernetes, "kubernetes", "kube_version"); err != nil {
 			return errors.Wrapf(err, "failed to set %q to config", "kube_version")
+		}
+	}
+	if o.DeleteAllComponents {
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "cri"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_cri")
+		}
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "etcd"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_etcd")
+		}
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "dns"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_dns")
+		}
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "image_registry"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_image_registry")
 		}
 	}
 
@@ -132,15 +139,6 @@ func NewDeleteNodesOptions() *DeleteNodesOptions {
 		CommonOptions: options.NewCommonOptions(),
 		Kubernetes:    defaultKubeVersion,
 	}
-	// Set the function to get the config for the specified Kubernetes version
-	o.CommonOptions.GetConfigFunc = func() (*kkcorev1.Config, error) {
-		data, err := getConfig(o.Kubernetes)
-		if err != nil {
-			return nil, err
-		}
-		config := &kkcorev1.Config{}
-		return config, errors.Wrapf(yaml.Unmarshal(data, config), "failed to unmarshal local configFile for kube_version: %q.", o.Kubernetes)
-	}
 	// Set the function to get the inventory
 	o.CommonOptions.GetInventoryFunc = getInventory
 
@@ -151,7 +149,8 @@ func NewDeleteNodesOptions() *DeleteNodesOptions {
 type DeleteNodesOptions struct {
 	options.CommonOptions
 	// Kubernetes version which the cluster will install.
-	Kubernetes string
+	Kubernetes          string
+	DeleteAllComponents bool
 }
 
 // Flags returns the flag sets for DeleteNodesOptions
@@ -160,6 +159,7 @@ func (o *DeleteNodesOptions) Flags() cliflag.NamedFlagSets {
 	kfs := fss.FlagSet("config")
 	// Add a flag for specifying the Kubernetes version
 	kfs.StringVar(&o.Kubernetes, "with-kubernetes", o.Kubernetes, fmt.Sprintf("Specify a supported version of kubernetes. default is %s", o.Kubernetes))
+	kfs.BoolVar(&o.DeleteAllComponents, "all-components", o.DeleteAllComponents, "Delete all cluster components, including cri, etcd, dns, and the image registry.")
 
 	return fss
 }
@@ -202,14 +202,28 @@ func (o *DeleteNodesOptions) Complete(cmd *cobra.Command, args []string) (*kkcor
 // completeConfig updates the configuration with container manager settings
 func (o *DeleteNodesOptions) completeConfig(nodes []string) error {
 	// If kube_version is not set in config, set it to the specified Kubernetes version
-	if _, ok, _ := unstructured.NestedFieldNoCopy(o.CommonOptions.Config.Value(), "kube_version"); !ok {
-		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), o.Kubernetes, "kube_version"); err != nil {
+	if _, ok, _ := unstructured.NestedFieldNoCopy(o.CommonOptions.Config.Value(), "kubernetes", "kube_version"); !ok {
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), o.Kubernetes, "kubernetes", "kube_version"); err != nil {
 			return errors.Wrapf(err, "failed to set %q to config", "kube_version")
 		}
 	}
 	// Set the list of nodes to be deleted in the config
 	if err := unstructured.SetNestedStringSlice(o.CommonOptions.Config.Value(), nodes, "delete_nodes"); err != nil {
 		return errors.Wrapf(err, "failed to set %q to config", "delete_nodes")
+	}
+	if o.DeleteAllComponents {
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "cri"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_cri")
+		}
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "etcd"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_etcd")
+		}
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "dns"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_dns")
+		}
+		if err := unstructured.SetNestedField(o.CommonOptions.Config.Value(), true, "delete", "image_registry"); err != nil {
+			return errors.Wrapf(err, "failed to set %q to config", "delete_image_registry")
+		}
 	}
 
 	return nil
@@ -234,11 +248,15 @@ func NewDeleteRegistryOptions() *DeleteRegistryOptions {
 // DeleteRegistryOptions contains options for deleting an image_registry created by kubekey
 type DeleteRegistryOptions struct {
 	options.CommonOptions
+	// kubernetes version which the config will install.
+	Kubernetes string
 }
 
 // Flags returns the flag sets for DeleteImageRegistryOptions
 func (o *DeleteRegistryOptions) Flags() cliflag.NamedFlagSets {
 	fss := o.CommonOptions.Flags()
+	kfs := fss.FlagSet("config")
+	kfs.StringVar(&o.Kubernetes, "with-kubernetes", o.Kubernetes, fmt.Sprintf("Specify a supported version of kubernetes. default is %s", o.Kubernetes))
 
 	return fss
 }

@@ -1,15 +1,67 @@
 ---
-- import_playbook: hook/pre_install.yaml
-
+# Load default variables and perform prechecks on all hosts
 - hosts:
     - localhost
   tags: ["always"]
   roles:
-    - role: init/init-artifact
-      tags: ["always"]
-    - role: init/init-cert
-      tags: ["always"]
-    - role: install/image-registry
-      tags: ["always"]
+    - defaults
+    - native/root
 
-- import_playbook: hook/post_install.yaml
+- hosts:
+    - localhost
+  tasks:
+    - name: PullImage | Download container images
+      tags: ["pull","image_registry"]
+      image:
+        pull:
+          auths: "{{ .cri.registry.auths | toJson }}"
+          images_dir: >-
+            {{ .binary_dir }}/images/
+          manifests: "{{ .image_manifests | toJson }}"
+      when:
+        - .image_manifests | default list | empty | not
+        - .download.download_image
+    - name: PushImage | Push images to registry
+      tags: ["push","image_registry"]
+      block:
+        - name: PushImage | Ensure Harbor project exists for each image
+          when: .image_registry.type | eq "harbor"
+          command: |
+            # Traverse first-level subdirectories in images_dir, skipping 'blobs'
+            
+            for registry_dir in {{ .binary_dir }}/images/*; do
+              if [ ! -d "$registry_dir" ] || [ "$(basename "$registry_dir")" = "blobs" ]; then
+                continue
+              fi
+
+              # Traverse second-level subdirectories in each registry_dir
+              for project_dir in "$registry_dir"/*; do
+                if [ ! -d "$project_dir" ]; then
+                  continue
+                fi
+
+                project=$(basename "$project_dir")
+
+                # Check if the Harbor project exists; create it if it does not
+                resp=$(curl -u "{{ .image_registry.auth.username }}:{{ .image_registry.auth.password }}" -k -X GET "https://{{ .image_registry.auth.registry }}/api/v2.0/projects/${project}")
+                if echo "$resp" | grep -q '"code":"NOT_FOUND"'; then
+                  curl -u "{{ .image_registry.auth.username }}:{{ .image_registry.auth.password }}" -k -X POST \
+                    -H "Content-Type: application/json" \
+                    "https://{{ .image_registry.auth.registry }}/api/v2.0/projects" \
+                    -d "{ \"project_name\": \"${project}\", \"public\": true}"
+                fi
+              done
+            done
+        - name: PushImage | Push images package to image registry
+          image:
+            push:
+              images_dir: >-
+                {{ .binary_dir }}/images/
+              dest: >-
+                {{ .image_registry.auth.registry }}/{{ .module.image.src.reference.repository }}:{{ .module.image.src.reference.reference }}
+              username: >-
+                {{ .image_registry.auth.username }}
+              password: >-
+                {{ .image_registry.auth.password }}
+              skip_tls_verify: true
+

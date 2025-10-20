@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"io"
 	"reflect"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	jsonpatch "github.com/evanphx/json-patch"
 	kkcorev1 "github.com/kubesphere/kubekey/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -81,6 +83,17 @@ func (h *InventoryHandler) Patch(request *restful.Request, response *restful.Res
 		api.HandleError(response, request, errors.Wrapf(err, "failed to get Inventory %s/%s from cluster", namespace, inventoryName))
 		return
 	}
+	// Pre-process: ensure all groups have hosts as arrays instead of null
+	// This is necessary because JSON patch operations like "add" with "-" path
+	// require the target to be an array, not null
+	if oldInventory.Spec.Groups != nil {
+		for groupName, group := range oldInventory.Spec.Groups {
+			if group.Hosts == nil {
+				group.Hosts = []string{}
+				oldInventory.Spec.Groups[groupName] = group
+			}
+		}
+	}
 	// Encode the old inventory object to JSON
 	oldInventoryJSON, err := runtime.Encode(codec, oldInventory)
 	if err != nil {
@@ -89,7 +102,7 @@ func (h *InventoryHandler) Patch(request *restful.Request, response *restful.Res
 	}
 
 	// Apply the patch to the old inventory and decode the result
-	applyPatchAndDecode := func() (*kkcorev1.Inventory, error) {
+	applyPatchAndDecode := func(objectJSON []byte) (*kkcorev1.Inventory, error) {
 		var patchedJSON []byte
 		switch patchType {
 		case types.JSONPatchType:
@@ -97,13 +110,13 @@ func (h *InventoryHandler) Patch(request *restful.Request, response *restful.Res
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to decode JSON patch")
 			}
-			patchedJSON, err = patchObj.Apply(oldInventoryJSON)
+			patchedJSON, err = patchObj.Apply(objectJSON)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to apply JSON patch to old inventory JSON")
 			}
 		case types.MergePatchType:
 			var err error
-			patchedJSON, err = jsonpatch.MergePatch(oldInventoryJSON, patchBody)
+			patchedJSON, err = jsonpatch.MergePatch(objectJSON, patchBody)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to apply merge patch to old inventory JSON")
 			}
@@ -118,9 +131,14 @@ func (h *InventoryHandler) Patch(request *restful.Request, response *restful.Res
 		return newInventory, nil
 	}
 
-	updatedInventory, err := applyPatchAndDecode()
+	updatedInventory, err := applyPatchAndDecode(oldInventoryJSON)
 	if err != nil {
 		api.HandleError(response, request, errors.Wrap(err, "failed to apply patch and decode inventory"))
+		return
+	}
+
+	if err := validateUniqueHostVariables(updatedInventory); err != nil {
+		api.HandleBadRequest(response, request, errors.Wrapf(err, "unable to patch Inventory %s/%s in the cluster: %v", namespace, inventoryName, err))
 		return
 	}
 
@@ -264,10 +282,13 @@ func (h *InventoryHandler) Info(request *restful.Request, response *restful.Resp
 	name := request.PathParameter("inventory")
 
 	inventory := &kkcorev1.Inventory{}
-
 	err := h.client.Get(request.Request.Context(), ctrlclient.ObjectKey{Namespace: namespace, Name: name}, inventory)
 	if err != nil {
-		api.HandleError(response, request, err)
+		if apierrors.IsNotFound(err) {
+			_ = response.WriteEntity(api.SUCCESS.SetResult("waiting for inventory to be created"))
+		} else {
+			api.HandleError(response, request, err)
+		}
 		return
 	}
 
@@ -285,7 +306,11 @@ func (h *InventoryHandler) ListHosts(request *restful.Request, response *restful
 	inventory := &kkcorev1.Inventory{}
 	err := h.client.Get(request.Request.Context(), ctrlclient.ObjectKey{Namespace: namespace, Name: name}, inventory)
 	if err != nil {
-		api.HandleError(response, request, err)
+		if apierrors.IsNotFound(err) {
+			_ = response.WriteEntity(api.SUCCESS.SetResult("waiting for inventory to be created"))
+		} else {
+			api.HandleError(response, request, err)
+		}
 		return
 	}
 
@@ -423,4 +448,48 @@ func (h *InventoryHandler) ListHosts(request *restful.Request, response *restful
 	// Sort and filter the host table, then write the result.
 	results := query.DefaultList(hostTable, queryParam, less, filter)
 	_ = response.WriteEntity(results)
+}
+
+// validateUniqueHostVariables ensures that certain host variables are unique across all hosts in the inventory.
+// Specifically, it checks that:
+//   - Each internal IPv4 address (_const.VariableIPv4) is assigned to only one host.
+//   - Each SSH connection (the combination of ssh_host and ssh_port under the "connector" variable) is unique to a single host.
+func validateUniqueHostVariables(inventory *kkcorev1.Inventory) error {
+	// Maps to track uniqueness: internal IPv4 address -> hostname, and "ssh_host:ssh_port" -> hostname
+	internalIPv4ToHostname := make(map[string]string)
+	sshConnectionToHostname := make(map[string]string)
+
+	for hostname, rawHostVars := range inventory.Spec.Hosts {
+		hostVars := variable.Extension2Variables(rawHostVars)
+
+		// 1. Ensure internal IPv4 address is unique across all hosts
+		if internalIPv4, ok := hostVars[_const.VariableIPv4].(string); ok && internalIPv4 != "" {
+			if existingHost, found := internalIPv4ToHostname[internalIPv4]; found && existingHost != hostname {
+				return fmt.Errorf("duplicate internal_ipv4 detected: %s is assigned to both %s and %s", internalIPv4, existingHost, hostname)
+			}
+			internalIPv4ToHostname[internalIPv4] = hostname
+		}
+
+		// 2. Ensure SSH connection (ssh_host + ssh_port) is unique across all hosts
+		var sshHost, sshPort string
+		if connector, ok := hostVars[_const.VariableConnector].(map[string]any); ok {
+			if v, ok := connector[_const.VariableConnectorHost].(string); ok {
+				sshHost = v
+			}
+			switch v := connector[_const.VariableConnectorPort].(type) {
+			case string:
+				sshPort = v
+			case float64:
+				sshPort = fmt.Sprintf("%.0f", v)
+			}
+		}
+		if sshHost != "" && sshPort != "" {
+			sshKey := sshHost + ":" + sshPort
+			if existingHost, found := sshConnectionToHostname[sshKey]; found && existingHost != hostname {
+				return fmt.Errorf("duplicate SSH connection detected: %s is assigned to both %s and %s", sshKey, existingHost, hostname)
+			}
+			sshConnectionToHostname[sshKey] = hostname
+		}
+	}
+	return nil
 }

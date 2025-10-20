@@ -1,15 +1,13 @@
 ---
-# load defaults vars
+# Load default variables and perform prechecks on all hosts
 - hosts:
     - all
-  vars_files:
-    - vars/delete_cluster.yaml
-
-- import_playbook: hook/pre_install.yaml
+  gather_facts: true
+  roles:
+    - defaults
+    - native/root
 
 - hosts:
    - image_registry
   roles:
     - role: uninstall/image-registry
-
-- import_playbook: hook/post_install.yaml

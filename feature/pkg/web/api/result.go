@@ -16,6 +16,11 @@ limitations under the License.
 
 package api
 
+import (
+	"encoding/json"
+	"os"
+)
+
 const (
 	// SchemaLabelSubfix is the label key used to indicate which schema a playbook belongs to.
 	SchemaLabelSubfix = "kubekey.kubesphere.io/schema"
@@ -35,6 +40,38 @@ const (
 	ResultPending = "pending"
 )
 
+const (
+	// CoreAPIPath defines the base path for core API endpoints in the KubeKey API server.
+	// All core resource management routes (inventories, playbooks, etc.) are prefixed with this path.
+	CoreAPIPath = "/kapis/"
+
+	// SwaggerAPIPath defines the base path for serving the Swagger UI (OpenAPI documentation).
+	// This is used to provide interactive API documentation for the KubeKey API server.
+	SwaggerAPIPath = "/swagger-ui/"
+
+	// ResourcesAPIPath defines the base path for resource-related endpoints.
+	// This path is used as the prefix for routes that serve static resources, schemas, and related files.
+	ResourcesAPIPath = "/resources/"
+
+	// KubeKeyTag is the tag used for KubeKey related resources
+	// This tag is used to identify and categorize KubeKey-specific resources
+	// in the system, making it easier to filter and manage them
+	KubeKeyTag = "kubekey"
+	// OpenAPITag is the tag used for OpenAPI documentation
+	// This tag helps organize and identify OpenAPI/Swagger documentation
+	// related to the KubeKey API endpoints
+	OpenAPITag = "api"
+	// ResourceTag is the tag used for resource-related endpoints
+	// This tag helps organize and identify API endpoints that deal with
+	// resource management and operations
+	ResourceTag = "resources"
+
+	// StatusOK represents a successful operation status
+	// Used to indicate that an API operation completed successfully
+	// without any errors or issues
+	StatusOK = "ok"
+)
+
 // SUCCESS is a global variable representing a successful operation result with a default success message.
 // It can be used as a standard response for successful API calls.
 var SUCCESS = Result{Message: ResultSucceed}
@@ -44,6 +81,13 @@ var SUCCESS = Result{Message: ResultSucceed}
 type Result struct {
 	Message string `description:"error message" json:"message"` // Message provides details about the result or error.
 	Result  any    `json:"result"`
+}
+
+// SetResult sets the Result field of the Result struct and returns the updated Result.
+// This is useful for chaining or for returning a Result with additional data.
+func (r Result) SetResult(result any) Result {
+	r.Result = result
+	return r
 }
 
 // ListResult is a generic struct representing a paginated list response.
@@ -120,6 +164,17 @@ type SchemaTable struct {
 	Playbook    map[string]SchemaTablePlaybook `json:"playbook"`    // Map of playbook labels to playbook details
 }
 
+// InventoryConnect only use for list ip connect check
+type InventoryConnect struct {
+	Connector InventoryConnectHostPort `json:"connector"`
+}
+
+// InventoryConnectHostPort only use for list ip connect check ,show connector host and port
+type InventoryConnectHostPort struct {
+	Host string `json:"host"`
+	Port string `json:"port"`
+}
+
 // IPTable represents an IP address entry and its SSH status information.
 // It indicates whether the IP is a localhost, if SSH is reachable, and if SSH authorization is present.
 type IPTable struct {
@@ -128,12 +183,29 @@ type IPTable struct {
 	Localhost     bool   `json:"localhost"`     // Whether the IP is a localhost IP
 	SSHReachable  bool   `json:"sshReachable"`  // Whether SSH port is reachable on this IP
 	SSHAuthorized bool   `json:"sshAuthorized"` // Whether SSH is authorized for this IP
+	Added         bool   `json:"added"`         // Indicates whether this IP has already been added to the inventory
+}
+
+// IPHostCheckData represents an IP address entry and its SSH connect data information.
+type IPHostCheckData struct {
+	IP                   string `json:"ip"`
+	SSHPort              string `json:"sshPort"`
+	SSHUser              string `json:"sshUser"`
+	SSHPwd               string `json:"sshPwd"`
+	SSHPrivateKeyContent string `json:"sshPrivateKeyContent"`
+}
+
+// IPHostCheckResult returns ip host check result
+type IPHostCheckResult struct {
+	IP      string `json:"ip"`
+	SSHPort string `json:"sshPort"`
+	Status  string `json:"status"`
 }
 
 // SchemaFile2Table converts a SchemaFile and its filename into a SchemaTable structure.
 // It initializes the SchemaTable fields from the SchemaFile's DataSchema and sets up the Playbook map
 // with playbook labels and their corresponding paths. Other playbook fields are left empty for later population.
-func SchemaFile2Table(schemaFile SchemaFile, filename string) SchemaTable {
+func SchemaFile2Table(schemaFile SchemaFile, configFile string, filename string) SchemaTable {
 	table := SchemaTable{
 		Name:        filename,
 		Title:       schemaFile.DataSchema.Title,
@@ -148,6 +220,27 @@ func SchemaFile2Table(schemaFile SchemaFile, filename string) SchemaTable {
 	for k, v := range schemaFile.PlaybookPath {
 		table.Playbook[k] = SchemaTablePlaybook{
 			Path: v,
+		}
+	}
+
+	// If the schema is for kubernetes.json, try to supplement the version field from the config file.
+	if filename == "kubernetes.json" {
+		// Attempt to read the config file.
+		if configFileBytes, err := os.ReadFile(configFile); err == nil {
+			var config map[string]map[string]any
+			// Attempt to unmarshal the config file into a map.
+			if err := json.Unmarshal(configFileBytes, &config); err == nil {
+				// Check if the config contains an entry for "kubernetes.json".
+				if v, ok := config[filename]; ok {
+					// Check if the "kubernetes" key exists and is a map.
+					if kube, ok := v["kubernetes"].(map[string]any); ok {
+						// If "kube_version" exists and is a string, set it as the table's version.
+						if kubeVer, ok := kube["kube_version"].(string); ok {
+							table.Version = kubeVer
+						}
+					}
+				}
+			}
 		}
 	}
 

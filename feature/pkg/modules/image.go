@@ -60,6 +60,10 @@ image:
     manifests: []string    # required: list of image manifests to pull
     images_dir: string     # required: directory to store pulled images
     skipTLSVerify: bool    # optional: skip TLS verification
+    autus:                 # optional: target image repo access information, slice type
+      - repo: string       # optional: target image repo
+        username: string   # optional: target image repo access username
+        password: string   # optional: target image repo access password
   push:                    # optional: push configuration
     username: string       # optional: registry username
     password: string       # optional: registry password
@@ -78,6 +82,13 @@ Usage Examples in Playbook Tasks:
            - nginx:latest
            - prometheus:v2.45.0
          images_dir: /path/to/images
+         auths:
+           - repo: docker.io
+             username: MyDockerAccount
+             password: my_password
+           - repo: my.dockerhub.local
+             username: MyHubAccount
+             password: my_password
      register: pull_result
    ```
 
@@ -99,6 +110,8 @@ Return Values:
 - On failure: Returns error message in stderr
 */
 
+const defaultRegistry = "docker.io"
+
 // imageArgs holds the configuration for image operations
 type imageArgs struct {
 	pull *imagePullArgs
@@ -110,16 +123,22 @@ type imagePullArgs struct {
 	imagesDir     string
 	manifests     []string
 	skipTLSVerify *bool
-	username      string
-	password      string
+	platform      string
+	auths         []imagePullAuth
+}
+
+type imagePullAuth struct {
+	Repo     string `json:"repo"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // pull retrieves images from a remote registry and stores them locally
-func (i imagePullArgs) pull(ctx context.Context) error {
+func (i imagePullArgs) pull(ctx context.Context, platform string) error {
 	for _, img := range i.manifests {
-		src, err := remote.NewRepository(img)
+		src, err := remote.NewRepository(normalizeImageNameSimple(img))
 		if err != nil {
-			return errors.Wrapf(err, "failed to get remote image %p", img)
+			return errors.Wrapf(err, "failed to get remote image %s", img)
 		}
 		src.Client = &auth.Client{
 			Client: &http.Client{
@@ -129,11 +148,8 @@ func (i imagePullArgs) pull(ctx context.Context) error {
 					},
 				},
 			},
-			Cache: auth.NewCache(),
-			Credential: auth.StaticCredential(src.Reference.Registry, auth.Credential{
-				Username: i.username,
-				Password: i.password,
-			}),
+			Cache:      auth.NewCache(),
+			Credential: i.pullAuthFunc(),
 		}
 
 		dst, err := newLocalRepository(filepath.Join(src.Reference.Registry, src.Reference.Repository)+":"+src.Reference.Reference, i.imagesDir)
@@ -141,12 +157,63 @@ func (i imagePullArgs) pull(ctx context.Context) error {
 			return err
 		}
 
-		if _, err = oras.Copy(ctx, src, src.Reference.Reference, dst, "", oras.DefaultCopyOptions); err != nil {
+		copyOption := oras.DefaultCopyOptions
+		if platform != "" {
+			plat, err := parsePlatform(platform)
+			// only work when input a correct platform like "linux/amd64" or "linux/arm64"
+			// if input a wrong platform,all platform of this image will be pulled
+			if err == nil {
+				copyOption.WithTargetPlatform(&plat)
+			}
+		}
+
+		if _, err = oras.Copy(ctx, src, src.Reference.Reference, dst, "", copyOption); err != nil {
 			return errors.Wrapf(err, "failed to pull image %q to local dir", img)
 		}
 	}
 
 	return nil
+}
+
+func (i imagePullArgs) pullAuthFunc() func(ctx context.Context, hostport string) (auth.Credential, error) {
+	var creds = make(map[string]auth.Credential)
+	for _, inputAuth := range i.auths {
+		var rp = inputAuth.Repo
+		if rp == "docker.io" || rp == "" {
+			rp = "registry-1.docker.io"
+		}
+		creds[rp] = auth.Credential{
+			Username: inputAuth.Username,
+			Password: inputAuth.Password,
+		}
+	}
+	return func(_ context.Context, hostport string) (auth.Credential, error) {
+		cred, ok := creds[hostport]
+		if !ok {
+			cred = auth.EmptyCredential
+		}
+		return cred, nil
+	}
+}
+
+// parse platform string to ocispec.Platform
+func parsePlatform(platformStr string) (imagev1.Platform, error) {
+	parts := strings.Split(platformStr, "/")
+	if len(parts) < 2 {
+		return imagev1.Platform{}, errors.New("invalid platform input: " + platformStr)
+	}
+
+	plat := imagev1.Platform{
+		OS:           parts[0],
+		Architecture: parts[1],
+	}
+
+	// handle platform like "arm/v7"
+	if len(parts) > 2 {
+		plat.Variant = strings.Join(parts[2:], "/")
+	}
+
+	return plat, nil
 }
 
 // imagePushArgs contains parameters for pushing images
@@ -229,13 +296,21 @@ func newImageArgs(_ context.Context, raw runtime.RawExtension, vars map[string]a
 		}
 		ipl := &imagePullArgs{}
 		ipl.manifests, _ = variable.StringSliceVar(vars, pull, "manifests")
-		ipl.username, _ = variable.StringVar(vars, pull, "username")
-		ipl.password, _ = variable.StringVar(vars, pull, "password")
+		ipl.auths = make([]imagePullAuth, 0)
+		pullAuths := make([]imagePullAuth, 0)
+		_ = variable.AnyVar(vars, pull, &pullAuths, "auths")
+		for _, a := range pullAuths {
+			a.Repo, _ = tmpl.ParseFunc(vars, a.Repo, func(b []byte) string { return string(b) })
+			a.Username, _ = tmpl.ParseFunc(vars, a.Username, func(b []byte) string { return string(b) })
+			a.Password, _ = tmpl.ParseFunc(vars, a.Password, func(b []byte) string { return string(b) })
+			ipl.auths = append(ipl.auths, a)
+		}
 		ipl.imagesDir, _ = variable.StringVar(vars, pull, "images_dir")
 		ipl.skipTLSVerify, _ = variable.BoolVar(vars, pull, "skip_tls_verify")
 		if ipl.skipTLSVerify == nil {
 			ipl.skipTLSVerify = ptr.To(false)
 		}
+		ipl.platform, _ = variable.StringVar(vars, pull, "platform")
 		// check args
 		if len(ipl.manifests) == 0 {
 			return nil, errors.New("\"pull.manifests\" is required")
@@ -294,32 +369,32 @@ func newImageArgs(_ context.Context, raw runtime.RawExtension, vars map[string]a
 }
 
 // ModuleImage handles the "image" module, managing container image operations including pulling and pushing images
-func ModuleImage(ctx context.Context, options ExecOptions) (string, string) {
+func ModuleImage(ctx context.Context, options ExecOptions) (string, string, error) {
 	// get host variable
 	ha, err := options.getAllVariables()
 	if err != nil {
-		return "", err.Error()
+		return StdoutFailed, StderrGetHostVariable, err
 	}
 
 	ia, err := newImageArgs(ctx, options.Args, ha)
 	if err != nil {
-		return "", err.Error()
+		return StdoutFailed, StderrParseArgument, err
 	}
 
 	// pull image manifests to local dir
 	if ia.pull != nil {
-		if err := ia.pull.pull(ctx); err != nil {
-			return "", fmt.Sprintf("failed to pull image: %v", err)
+		if err := ia.pull.pull(ctx, ia.pull.platform); err != nil {
+			return StdoutFailed, "failed to pull image", err
 		}
 	}
 	// push image to private registry
 	if ia.push != nil {
 		if err := ia.push.push(ctx, ha); err != nil {
-			return "", fmt.Sprintf("failed to push image: %v", err)
+			return StdoutFailed, "failed to push image", err
 		}
 	}
 
-	return StdoutSuccess, ""
+	return StdoutSuccess, "", nil
 }
 
 // findLocalImageManifests get image manifests with whole image's name.
@@ -611,6 +686,30 @@ func (i imageTransport) get(request *http.Request) *http.Response {
 	}
 
 	return responseNotAllowed
+}
+
+func normalizeImageNameSimple(image string) string {
+	parts := strings.Split(image, "/")
+
+	switch len(parts) {
+	case 1:
+		// image like: ubuntu -> docker.io/library/ubuntu
+		return fmt.Sprintf("%s/library/%s", defaultRegistry, image)
+	case 2:
+		// image like: project/xx or registry/project
+		firstPart := parts[0]
+		if firstPart == "localhost" || (strings.Contains(firstPart, ".") || strings.Contains(firstPart, ":")) {
+			return image
+		}
+		return fmt.Sprintf("%s/%s", defaultRegistry, image)
+	default:
+		// image like: registry/project/xx/sub
+		firstPart := parts[0]
+		if firstPart == "localhost" || (strings.Contains(firstPart, ".") || strings.Contains(firstPart, ":")) {
+			return image
+		}
+		return fmt.Sprintf("%s/%s", defaultRegistry, image)
+	}
 }
 
 func init() {
