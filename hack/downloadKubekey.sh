@@ -16,6 +16,7 @@
 
 ISLINUX=true
 LATEST_VERSION=
+LATEST_WEB_INSTALLER_VERSION=
 
 OSTYPE="linux"
 
@@ -36,6 +37,7 @@ fi
 
 if [ "x${VERSION}" = "xlatest" ]; then
   VERSION=${LATEST_VERSION}
+  WEB_INSTALLER_VERSION=${LATEST_WEB_INSTALLER_VERSION}
 fi
 
 # Fetch latest version of 3.x
@@ -114,7 +116,7 @@ fi
 if check_version "${WEB_INSTALLER_VERSION}"; then
   WEB_DOWNLOAD_URL=https://kubekey.pek3b.qingstor.com/github.com/kubesphere/web-installer/releases/download/${WEB_INSTALLER_VERSION}/web-installer.tgz
   echo ""
-  echo "Downloading kubekey web_installer ${VERSION} from ${DOWNLOAD_URL} ..."
+  echo "Downloading kubekey web_installer ${WEB_INSTALLER_VERSION} from ${DOWNLOAD_URL} ..."
   echo ""
 
   curl -fsLO "$WEB_DOWNLOAD_URL"
@@ -131,51 +133,52 @@ if check_version "${WEB_INSTALLER_VERSION}"; then
   fi
 fi
 
-# generate package.sh
-cat > package.sh << 'EOF'
-#!/bin/sh
+if ! echo "$VERSION" | grep -E '^v3\.[0-9]+\.[0-9]+$' >/dev/null; then
+  # generate package.sh
+  cat > package.sh << 'EOF'
+  #!/bin/sh
 
-set -e
+  set -e
 
-# Get the configuration file path from the first argument, default to config.yaml if not provided
-if [ -n "$1" ]; then
-  CONFIG_FILE="$1"
-else
-  CONFIG_FILE="config.yaml"
+  # Get the configuration file path from the first argument, default to config.yaml if not provided
+  if [ -n "$1" ]; then
+    CONFIG_FILE="$1"
+  else
+    CONFIG_FILE="config.yaml"
+  fi
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Configuration file $CONFIG_FILE does not exist. Please check the file path."
+    exit 1
+  fi
+
+  echo "Exporting artifact with kk..."
+  ./kk artifact export -c "$CONFIG_FILE" --workdir prepare -a $(pwd)/artifact.tgz
+  if [ $? -ne 0 ]; then
+    echo "Failed to export artifact with kk. Please check the command output above."
+    exit 1
+  fi
+
+  echo "Preparing offline package directory..."
+  mkdir -p offline/kubekey/kubekey
+
+  echo "Extracting artifact.tgz to offline/ ..."
+  tar -xzf artifact.tgz -C offline/kubekey/kubekey --no-same-owner
+
+  echo "Extracting web-installer.tgz to offline/ ..."
+  tar -xzf web-installer.tgz -C offline/ --no-same-owner
+
+  echo "Copying config.yaml and kk to offline/ ..."
+  cp "$CONFIG_FILE" offline/
+  cp kk offline/
+
+  echo "Creating offline.tgz package ..."
+  tar -czf offline.tgz offline
+
+  echo "Offline package offline.tgz has been created successfully."
+  EOF
+
+  chmod +x package.sh
 fi
-if [ ! -f "$CONFIG_FILE" ]; then
-  echo "Configuration file $CONFIG_FILE does not exist. Please check the file path."
-  exit 1
-fi
-
-echo "Exporting artifact with kk..."
-./kk artifact export -c "$CONFIG_FILE" --workdir prepare -a $(pwd)/artifact.tgz
-if [ $? -ne 0 ]; then
-  echo "Failed to export artifact with kk. Please check the command output above."
-  exit 1
-fi
-
-echo "Preparing offline package directory..."
-mkdir -p offline/kubekey/kubekey
-
-echo "Extracting artifact.tgz to offline/ ..."
-tar -xzf artifact.tgz -C offline/kubekey/kubekey --no-same-owner
-
-echo "Extracting web-installer.tgz to offline/ ..."
-tar -xzf web-installer.tgz -C offline/ --no-same-owner
-
-echo "Copying config.yaml and kk to offline/ ..."
-cp "$CONFIG_FILE" offline/
-cp kk offline/
-
-echo "Creating offline.tgz package ..."
-tar -czf offline.tgz offline
-
-echo "Offline package offline.tgz has been created successfully."
-EOF
-
-chmod +x package.sh
-
 
 echo ""
 echo "Kubekey ${VERSION} Download Complete!"
