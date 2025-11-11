@@ -60,7 +60,7 @@ jobs:
           gh release upload "$TAG" config/capkk/release/* --clobber
           gh release upload "$TAG" hack/downloadKubekey.sh --clobber
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
 
       - name: Synchronize artifacts to OSS
         run: |
