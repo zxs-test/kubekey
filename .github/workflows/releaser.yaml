@@ -7,8 +7,7 @@ on:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
-    if: github.repository == 'kubesphere/kubekey'
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -39,7 +38,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LDFLAGS: ${{ steps.prepare.outputs.ldflags }}
-
+          
+      - name: GitHub Script
+        uses: softprops/action-gh-release@v2
+          
       - name: Upload Extra File
         run: |
           TAG=${{ steps.prepare.outputs.version }}
