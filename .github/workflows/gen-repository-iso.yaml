@@ -83,8 +83,8 @@ jobs:
           echo "access_key_id: ${{secrets.KS_QSCTL_ACCESS_KEY_ID}}" > qsctl-config.yaml
           echo "secret_access_key: ${{ secrets.KS_QSCTL_SECRET_ACCESS_KEY }}" >> qsctl-config.yaml
           
-          qsctl -c qsctl-config.yaml cp ${{ matrix.name }}.iso.sha256sum.txt qs://kubekey/kubesphere/kubekey/releases/download/ISO/${{ steps.prepare.outputs.version }}/${{ matrix.name }}.iso.sha256sum.txt
-          qsctl -c qsctl-config.yaml cp ${{ matrix.name }}-amd64.iso qs://kubekey/kubesphere/kubekey/releases/download/ISO/${{ steps.prepare.outputs.version }}/${{ matrix.name }}-amd64.iso
-          qsctl -c qsctl-config.yaml cp ${{ matrix.name }}-arm64.iso qs://kubekey/kubesphere/kubekey/releases/download/ISO/${{ steps.prepare.outputs.version }}/${{ matrix.name }}-arm64.iso
+          qsctl -c qsctl-config.yaml cp ${{ matrix.name }}.iso.sha256sum.txt qs://kubekey/kubesphere/kubekey/releases/download/iso-latest/${{ steps.prepare.outputs.version }}/${{ matrix.name }}.iso.sha256sum.txt
+          qsctl -c qsctl-config.yaml cp ${{ matrix.name }}-amd64.iso qs://kubekey/kubesphere/kubekey/releases/download/iso-latest/${{ steps.prepare.outputs.version }}/${{ matrix.name }}-amd64.iso
+          qsctl -c qsctl-config.yaml cp ${{ matrix.name }}-arm64.iso qs://kubekey/kubesphere/kubekey/releases/download/iso-latest/${{ steps.prepare.outputs.version }}/${{ matrix.name }}-arm64.iso
 
           rm -rf qsctl-config.yaml

@@ -9,9 +9,9 @@ ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
-       BASEURL="https://update.cs2c.com.cn/NS/V10/V10SP3/os/adv/lic/base/x86_64/"; \
+       BASEURL="https://update.cs2c.com.cn/NS/V10/V10SP1/os/adv/lic/base/x86_64/"; \
     else \
-       BASEURL="https://update.cs2c.com.cn/NS/V10/V10SP3/os/adv/lic/base/aarch64/"; \
+       BASEURL="https://update.cs2c.com.cn/NS/V10/V10SP1/os/adv/lic/base/aarch64/"; \
     fi \
     && echo "[kylin-base]" > /etc/yum.repos.d/kylin.repo \
     && echo "name=Kylin Base" >> /etc/yum.repos.d/kylin.repo \
