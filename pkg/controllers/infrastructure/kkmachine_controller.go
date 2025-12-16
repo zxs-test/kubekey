@@ -369,7 +369,7 @@ func (r *KKMachineReconciler) getConfig(scope *clusterScope, kkmachine *capkkinf
 		if kkmachine.Spec.Version == nil {
 			return config, errors.New("kubeVersion or config is empty")
 		}
-		data, err := kubeVersionConfigs.ReadFile(fmt.Sprintf("versions/%s.yaml", *kkmachine.Spec.Version))
+		data, err := kubeVersionConfigs.ReadFile(fmt.Sprintf("versions/%s.yaml", (*kkmachine.Spec.Version)[:5]))
 		if err != nil {
 			return config, err
 		}
