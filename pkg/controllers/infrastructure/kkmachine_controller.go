@@ -388,6 +388,8 @@ func (r *KKMachineReconciler) getConfig(scope *clusterScope, kkmachine *capkkinf
 		return config, errors.Wrapf(err, "failed to set %q in config", "node_name")
 	}
 	hostDataRaw := scope.Inventory.Spec.Hosts[nodeName]
+	fmt.Println("get node name = ", nodeName)
+	fmt.Println("node host raw = ", string(hostDataRaw.Raw))
 	var hostData map[string]any
 	_ = json.Unmarshal(hostDataRaw.Raw, &hostDataRaw)
 	_ = unstructured.SetNestedField(config.Value(), hostData)
