@@ -33,6 +33,7 @@ import (
 	"github.com/kubesphere/kubekey/v4/cmd/controller-manager/app/options"
 	_const "github.com/kubesphere/kubekey/v4/pkg/const"
 	"github.com/kubesphere/kubekey/v4/pkg/controllers/util"
+	"github.com/kubesphere/kubekey/v4/pkg/variable"
 )
 
 // KKMachineReconciler reconciles a KKMachine object.
@@ -389,8 +390,9 @@ func (r *KKMachineReconciler) getConfig(scope *clusterScope, kkmachine *capkkinf
 	}
 	hostDataRaw := scope.Inventory.Spec.Hosts[nodeName]
 	var hostData map[string]any
-	_ = json.Unmarshal(hostDataRaw.Raw, &hostDataRaw)
-	_ = unstructured.SetNestedField(config.Value(), hostData, "")
+	_ = json.Unmarshal(hostDataRaw.Raw, &hostData)
+
+	config.Spec.Object = &unstructured.Unstructured{Object: variable.CombineVariables(config.Value(), hostData)}
 
 	if err := unstructured.SetNestedField(config.Value(), *kkmachine.Spec.Version, "kube_version"); err != nil {
 		return config, errors.Wrapf(err, "failed to set %q in config", "kube_version")
