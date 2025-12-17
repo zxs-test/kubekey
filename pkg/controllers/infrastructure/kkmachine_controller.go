@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -382,9 +383,15 @@ func (r *KKMachineReconciler) getConfig(scope *clusterScope, kkmachine *capkkinf
 	if err := unstructured.SetNestedField(config.Value(), _const.CAPKKWorkdir, _const.Workdir); err != nil {
 		return config, errors.Wrapf(err, "failed to set %q in config", _const.Workdir)
 	}
-	if err := unstructured.SetNestedField(config.Value(), _const.ProviderID2Host(scope.Name, kkmachine.Spec.ProviderID), "node_name"); err != nil {
+	nodeName := _const.ProviderID2Host(scope.Name, kkmachine.Spec.ProviderID)
+	if err := unstructured.SetNestedField(config.Value(), nodeName, "node_name"); err != nil {
 		return config, errors.Wrapf(err, "failed to set %q in config", "node_name")
 	}
+	hostDataRaw := scope.Inventory.Spec.Hosts[nodeName]
+	var hostData map[string]any
+	_ = json.Unmarshal(hostDataRaw.Raw, &hostDataRaw)
+	_ = unstructured.SetNestedField(config.Value(), hostData)
+
 	if err := unstructured.SetNestedField(config.Value(), *kkmachine.Spec.Version, "kube_version"); err != nil {
 		return config, errors.Wrapf(err, "failed to set %q in config", "kube_version")
 	}
