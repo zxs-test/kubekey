@@ -94,7 +94,6 @@ jobs:
 
   build-harbor:
     runs-on: ubuntu-latest
-    if: github.repository == 'kubesphere/kubekey'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
