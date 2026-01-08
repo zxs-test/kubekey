@@ -112,7 +112,7 @@ jobs:
             if [ -d "config/harbor/$d" ]; then
               cd "config/harbor/$d" && make build
               mv harbor-offline-installer-"$d"-linux-arm64.tgz harbor-offline-installer-"$d".tgz
-              qsctl -c /usr/local/bin/qsctl-config.yaml cp harbor-offline-installer-"$d".tgz qs://kubekey/github.com/kubesphere/kubekey/releases/download/iso-latest/harbor-offline-installer-"$d".tgz
+              # qsctl -c /usr/local/bin/qsctl-config.yaml cp harbor-offline-installer-"$d".tgz qs://kubekey/github.com/kubesphere/kubekey/releases/download/iso-latest/harbor-offline-installer-"$d".tgz
             fi
           done
 
