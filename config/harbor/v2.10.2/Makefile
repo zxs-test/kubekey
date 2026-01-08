@@ -1,9 +1,10 @@
 DOCKER_PLATFORM?=linux/arm64
 DOCKER_BUILD_IMAGES?=false
+IMAGENAMESPACE?=hub.kubesphere.com.cn/harbor
 VERSION?=v2.10.2
+BASEIMAGENAMESPACE?=hub.kubesphere.com.cn/harbor
 BASEIMAGETAG?=v2.10.2
 NPM_REGISTRY?=https://registry.npmmirror.com
-BASEIMAGENAMESPACE?=hub.kubesphere.com.cn/harbor
 
 
 .PHONY: build
