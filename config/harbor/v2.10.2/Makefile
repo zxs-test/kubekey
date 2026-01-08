@@ -3,7 +3,7 @@ DOCKER_BUILD_IMAGES?=false
 VERSION?=v2.10.2
 BASEIMAGETAG?=v2.10.2
 NPM_REGISTRY?=https://registry.npmmirror.com
-BASEIMAGENAMESPACE?=bitnamilegacy
+BASEIMAGENAMESPACE?=hub.kubesphere.com.cn/harbor
 
 
 .PHONY: build
